@@ -24,6 +24,7 @@ class MyApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (context) => ColorNotifier()),
+        ChangeNotifierProvider(create: (context) => DetectionNotifier()),
       ],
       child: MaterialApp(
         title: 'Dot Detection Application',
@@ -50,20 +51,31 @@ class _CameraScreenState extends State<CameraScreen> {
   Timer? timer;
   bool isCapturing = false;
 
-  List<int> getSizeOfFrame() {
+  List<double> getCircles() {
     final resolution = controller!.value.previewSize;
-    final width = resolution!.height.toInt();
-    final height = resolution!.width.toInt();
+    final width = MediaQuery.of(context).size.width;
+    final height = MediaQuery.of(context).size.height;
 
-    final int x1 = width ~/ 6;
-    final int y1 = height ~/ 2;
-    final int x2 = (5 * width) ~/ 6;
-    final int y2 = height ~/ 2;
-    final int r = width ~/ 15;
-    final int x3 = width ~/ 2;
-    final int y3 = height ~/ 2;
 
-    return [x1, y1, x2, y2, x3, y3, r, width, height];
+    final double x1, y1, x2, y2, x3, y3, x4, y4, x5, y5, r;
+
+    List<double> screenRatios = getPoints();
+
+    x1 = screenRatios[0] * width;
+    y1 = screenRatios[1] * height;
+    x2 = screenRatios[2] * width;
+    y2 = screenRatios[3] * height;
+    x3 = screenRatios[4] * width;
+    y3 = screenRatios[5] * height;
+    x4 = screenRatios[6] * width;
+    y4 = screenRatios[7] * height;
+    x5 = screenRatios[8] * width;
+    y5 = screenRatios[9] * height;
+    r = screenRatios[10] * width;
+
+    return [x1, y1, x2, y2, x3, y3, x4, y4, x5, y5, r];
+
+
   }
 
   String get currentStatus {
@@ -106,26 +118,23 @@ class _CameraScreenState extends State<CameraScreen> {
     await controller!.initialize();
     setState(() {});
 
-    timer = Timer.periodic(const Duration(milliseconds: 50), (timer) async {
+    timer = Timer.periodic(const Duration(milliseconds: 200), (timer) async {
       if (isCapturing) return;
       isCapturing = true;
 
       try {
         final image = await controller!.takePicture();
 
-        final compressedImageBytes = compressImage(image.path);
-        final encodedImage = base64Encode(compressedImageBytes);
+        final cropped_and_compressed_image = await cropAndCompressImage(image.path);
+        final encodedImage = base64Encode(cropped_and_compressed_image);
 
-        final List<int> circles = getSizeOfFrame();
 
         final data = jsonEncode({
           'image': encodedImage,
-          'circle1': [circles[0], circles[1], circles[6]],
-          'circle2': [circles[4], circles[5], circles[6]],
-          'circle3': [circles[2], circles[3], circles[6]],
         });
 
         channel.sink.add(data);
+
       } catch (e) {
         debugPrint('Error capturing image: $e');
       } finally {
@@ -134,17 +143,39 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
+  Future<Uint8List> cropAndCompressImage(String imagePath, {int quality = 85}) async {
+    final imageBytes = await File(imagePath).readAsBytes();
+    final image = img.decodeImage(imageBytes)!;
+
+    final rectWidth = (image.width * 0.8).toInt();
+    final rectHeight = (image.height * 0.5).toInt();
+    final left = (image.width - rectWidth) ~/ 2;
+    final top = (image.height - rectHeight) ~/ 2;
+
+    final croppedImage = img.copyCrop(image, x: left, y: top, width : rectWidth, height :rectHeight);
+    final compressedImage = img.encodeJpg(croppedImage, quality: quality);
+    return Uint8List.fromList(compressedImage);
+  }
+
   void initializeWebSocket() {
     channel = IOWebSocketChannel.connect('ws://172.20.10.11:8765');
     channel.stream.listen((dynamic data) {
       debugPrint(data);
       data = jsonDecode(data);
-      if (data['data'] == null) {
+      if (!data['status']) {
         debugPrint('Server error occurred in recognizing face');
         return;
       }
 
       if (data["status"] == true) {
+
+
+        final List detections = data['detections'];
+        context.read<DetectionNotifier>().changeDetections(detections);
+        checkCircles(detections, controller!.value.previewSize!);
+
+        /*
+
 
         final stats = data['data'];
         statusLeft = stats[0] == 1 ? DetectionStatus.detected : DetectionStatus.notDetected;
@@ -155,6 +186,7 @@ class _CameraScreenState extends State<CameraScreen> {
         stats[1] == 1 ? context.read<ColorNotifier>().changeColorMiddle(Colors.green) : context.read<ColorNotifier>().changeColorMiddle(Colors.red);
         stats[2] == 1 ? context.read<ColorNotifier>().changeColorRight(Colors.green) : context.read<ColorNotifier>().changeColorRight(Colors.red);
 
+         */
 
 
       } else {
@@ -168,11 +200,6 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
-  Uint8List compressImage(String imagePath, {int quality = 85}) {
-    final image = img.decodeImage(Uint8List.fromList(File(imagePath).readAsBytesSync()))!;
-    final compressedImage = img.encodeJpg(image, quality: quality); // lossless compression
-    return compressedImage;
-  }
 
   @override
   void dispose() {
@@ -188,14 +215,17 @@ class _CameraScreenState extends State<CameraScreen> {
       return const SizedBox();
     }
 
-    final List<int> circles = getSizeOfFrame();
+    final List<double> circles = getCircles();
     final colorLeft = context.watch<ColorNotifier>().colorLeft;
     final colorRight = context.watch<ColorNotifier>().colorRight;
     final colorMiddle = context.watch<ColorNotifier>().colorMiddle;
+    final colorDownLeft = context.watch<ColorNotifier>().downLeft;
+    final colorDownRight = context.watch<ColorNotifier>().downRight;
 
-    final color = [colorLeft, colorRight, colorMiddle];
-
+    final color = [colorLeft, colorRight, colorMiddle, colorDownLeft, colorDownRight];
     final screenSize = MediaQuery.of(context).size;
+
+    final List detections = context.watch<DetectionNotifier>().detections;
 
     return Scaffold(
       extendBody: true,
@@ -211,10 +241,23 @@ class _CameraScreenState extends State<CameraScreen> {
                 Positioned.fill(
                   child: CustomPaint(
                     painter: CirclePainter(
-                      circles[0], circles[1], circles[6],
-                      circles[2], circles[3], circles[6],
-                      circles[4], circles[5], circles[6],
+                      circles,
                       color,
+                      controller!.value.previewSize,
+                      screenSize
+                    ),
+                  ),
+                ),
+
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: RectangleOverlayPainter(),
+                  ),
+                ),
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: DetectionPainter(
+                      detections,
                       controller!.value.previewSize,
                       screenSize
                     ),
@@ -224,13 +267,12 @@ class _CameraScreenState extends State<CameraScreen> {
                   alignment: const Alignment(0, .85),
                   child: ElevatedButton(
                     child: Text(
-                      currentStatus,
+                      screenSize.width.toString() + "x" + screenSize.height.toString(),
                       style: const TextStyle(fontSize: 20),
                     ),
                     onPressed: () {},
                   ),
                 ),
-
               ],
             ),
           ),
@@ -238,17 +280,155 @@ class _CameraScreenState extends State<CameraScreen> {
       ),
     );
   }
+
+  void checkCircles(List detections, Size cameraSize){
+
+    final Size screenSize = MediaQuery.of(context).size;
+    List circles = getCircles();
+
+    final List flags = [false, false , false, false, false];
+
+    for (int i = 0; i < detections.length; i++){
+      final detection = detections[i];
+      final double x = (detection[0] * screenSize.width / cameraSize.height) + screenSize.width * 0.1;
+      final double y = (detection[1] * screenSize.height / cameraSize.width) + screenSize.height * 0.25;
+
+      if (x > circles[0] - 20 && x < circles[0] + 20 && y > circles[1] - 20 && y < circles[1] + 20){
+        context.read<ColorNotifier>().changeColorLeft(Colors.green);
+        flags[0] = true;
+      } else if (x > circles[2] - 20 && x < circles[2] + 20 && y > circles[3] - 20 && y < circles[3] + 20){
+        context.read<ColorNotifier>().changeColorMiddle(Colors.green);
+        flags[1] = true;
+      } else if (x > circles[4] - 20 && x < circles[4] + 20 && y > circles[5] - 20 && y < circles[5] + 20){
+        context.read<ColorNotifier>().changeColorRight(Colors.green);
+        flags[2] = true;
+      } else if (x > circles[6] - 20 && x < circles[6] + 20 && y > circles[7] - 20 && y < circles[7] + 20){
+        context.read<ColorNotifier>().changeColorDownLeft(Colors.green);
+        flags[3] = true;
+      } else if (x > circles[8] - 20 && x < circles[8] + 20 && y > circles[9] - 20 && y < circles[9] + 20){
+        context.read<ColorNotifier>().changeColorDownRight(Colors.green);
+        flags[4] = true;
+      }
+    }
+
+    if (!flags[0]){
+      context.read<ColorNotifier>().changeColorLeft(Colors.red);
+    }
+    if (!flags[1]){
+      context.read<ColorNotifier>().changeColorMiddle(Colors.red);
+    }
+    if (!flags[2]){
+      context.read<ColorNotifier>().changeColorRight(Colors.red);
+    }
+    if (!flags[3]){
+      context.read<ColorNotifier>().changeColorDownLeft(Colors.red);
+    }
+    if (!flags[4]){
+      context.read<ColorNotifier>().changeColorDownRight(Colors.red);
+    }
+
+  }
+
+  List<double> getPoints(){
+
+    /*
+    canvas.drawCircle(Offset(width / 6, 2* height / 5), 20, paintLeft);
+    canvas.drawCircle(Offset(5* width / 6, 2* height / 5), 20, paintRight);
+    canvas.drawCircle(Offset(width / 2, 2* height / 5), 20, paintMiddle);
+     */
+
+    double x1 = 1/6;
+    double y1 = 4/10;
+    double x2 = 1/2;
+    double y2 = 4/10;
+    double x3 = 5/6;
+    double y3 = 4/10;
+    double x4 = 1/6;
+    double y4 = 6.7/10;
+    double x5 = 5/6;
+    double y5 = 6.7/10;
+    double r = 0.0;
+
+    return [x1, y1, x2, y2, x3, y3, x4, y4, x5, y5, r];
+
+  }
+
+}
+
+
+class RectangleOverlayPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black.withOpacity(0.7)
+      ..style = PaintingStyle.fill;
+
+    final rectWidth = size.width * 0.8;
+    final rectHeight = size.height * 0.5;
+    final left = (size.width - rectWidth) / 2;
+    final top = (size.height - rectHeight) / 2;
+
+    final rect = Rect.fromLTWH(left, top, rectWidth, rectHeight);
+    final path = Path()
+      ..addRect(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..addRect(rect)
+      ..fillType = PathFillType.evenOdd;
+
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) {
+    return false;
+  }
+}
+
+
+class DetectionPainter extends CustomPainter{
+  final Size? previewSize;
+  final Size? screenSize;
+  final List detections;
+  final double widthOffset;
+  final double heightOffset;
+
+  DetectionPainter(this.detections, this.previewSize, this.screenSize, {this.widthOffset = 0, this.heightOffset = 0});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+
+    final paint = Paint()
+      ..color = Colors.blue
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    const r = 5;
+
+    for (int i =0; i<detections.length ; i++){
+      final detection = detections[i];
+
+      //detection[0] is width of camera preview and detection[1] is height of camera preview
+
+      final double x = detection[0] * screenSize!.width / previewSize!.height;
+      final double y = detection[1] * screenSize!.height / previewSize!.width;
+
+      canvas.drawCircle(Offset(x + (screenSize!.width * 0.1) , y + (screenSize!.height * 0.25)), r.toDouble(), paint);
+    }
+
+  }
+
+  @override
+  bool shouldRepaint(DetectionPainter oldDelegate) {
+    return oldDelegate.detections != detections;
+  }
 }
 
 class CirclePainter extends CustomPainter {
-  final int x1, y1, r1;
-  final int x2, y2, r2;
-  final int x3, y3, r3;
+  List<double> circles;
   List <Color> color;
   final Size? previewSize;
   final Size? screenSize;
 
-  CirclePainter(this.x1, this.y1, this.r1, this.x2, this.y2, this.r2, this.x3, this.y3, this.r3, this.color, this.previewSize, this.screenSize);
+  CirclePainter(this.circles,this.color, this.previewSize, this.screenSize);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -259,13 +439,23 @@ class CirclePainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3;
 
-    final paintRight = Paint()
+    final paintMiddle = Paint()
       ..color = color[1]
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3;
 
-    final paintMiddle = Paint()
+    final paintRight = Paint()
       ..color = color[2]
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    final paintDownLeft = Paint()
+      ..color = color[3]
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3;
+
+    final paintDownRight = Paint()
+      ..color = color[4]
       ..style = PaintingStyle.stroke
       ..strokeWidth = 3;
 
@@ -275,19 +465,17 @@ class CirclePainter extends CustomPainter {
     //canvas.drawCircle(Offset(screenSize!.width / 4, previewSize!.height  / 2), r1.toDouble() * scaleX, paint);
     //canvas.drawCircle(Offset(3 * screenSize!.width / 4, previewSize!.height  / 2), r2.toDouble() * scaleX, paint);
 
-    canvas.drawCircle(Offset(375 / 6, 667 / 2), 30, paintLeft);
-    canvas.drawCircle(Offset(5* 375 / 6, 667 / 2), 30, paintRight);
-    canvas.drawCircle(Offset(375 / 2, 667 / 2), 30, paintMiddle);
-
-
+    canvas.drawCircle(Offset(circles[0], circles[1]), 20, paintLeft);
+    canvas.drawCircle(Offset(circles[2], circles[3]), 20, paintMiddle);
+    canvas.drawCircle(Offset(circles[4], circles[5]), 20, paintRight);
+    //canvas.drawCircle(Offset(circles[6], circles[7]), 20, paintDownLeft);
+    //canvas.drawCircle(Offset(circles[8], circles[9]), 20, paintDownRight);
 
   }
 
   @override
   bool shouldRepaint(CirclePainter oldDelegate) {
-    return oldDelegate.color != color ||
-        oldDelegate.x1 != x1 || oldDelegate.y1 != y1 || oldDelegate.r1 != r1 ||
-        oldDelegate.x2 != x2 || oldDelegate.y2 != y2 || oldDelegate.r2 != r2;
+    return oldDelegate.color != color;
   }
 }
 
@@ -300,6 +488,13 @@ class ColorNotifier extends ChangeNotifier {
 
   Color _colorMiddle = Colors.red;
   Color get colorMiddle => _colorMiddle;
+
+  Color _downLeft = Colors.red;
+  Color get downLeft => _downLeft;
+
+  Color _downRight = Colors.red;
+  Color get downRight => _downRight;
+
 
   void changeColorLeft(Color newColor) {
     _colorLeft = newColor;
@@ -315,4 +510,25 @@ class ColorNotifier extends ChangeNotifier {
     _colorMiddle = newColor;
     notifyListeners();
   }
+
+  void changeColorDownLeft(Color newColor) {
+    _downLeft = newColor;
+    notifyListeners();
+  }
+
+  void changeColorDownRight(Color newColor) {
+    _downRight = newColor;
+    notifyListeners();
+  }
+}
+
+class DetectionNotifier extends ChangeNotifier{
+  List _detections = [];
+  List get detections => _detections;
+
+  void changeDetections(List newDetections){
+    _detections = newDetections;
+    notifyListeners();
+  }
+
 }
